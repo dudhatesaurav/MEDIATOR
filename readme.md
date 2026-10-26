@@ -1,248 +1,257 @@
+# 🧭 Mediator: Persona- and Act-Guided Direct Preference Optimization (PA-DPO)
+
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.x](https://img.shields.io/badge/PyTorch-2.x-EE4C2C.svg)](https://pytorch.org/)
+[![Transformers](https://img.shields.io/badge/%F0%9F%A4%97-Transformers-orange)](https://huggingface.co/docs/transformers)
+[![License: Academic](https://img.shields.io/badge/License-Academic%20Use%20Only-lightgrey.svg)](LICENSE)
+
+Official implementation of **PA-DPO (Persona-Act Direct Preference Optimization)** — a framework for persona-grounded, dialogue-act-consistent conversational agents in negotiation settings.
+
 ---
 
-🧭 Mediator: Persona- and Act-Guided Direct Preference Optimization (PA-DPO)
+## 📌 Table of Contents
+- [Overview & Architecture](#-overview--architecture)
+- [Methodology](#-methodology)
+- [Repository Structure](#-repository-structure)
+- [Installation & Environment Setup](#-installation--environment-setup)
+- [Dataset Schema](#-dataset-schema)
+- [Pipeline Execution](#-pipeline-execution)
+  - [1. Data Preprocessing](#step-1-data-preprocessing)
+  - [2. Supervised Fine-Tuning (SFT)](#step-2-supervised-fine-tuning-sft)
+  - [3. Preference Dataset Generation](#step-3-preference-dataset-generation)
+  - [4. PA-DPO Alignment](#step-4-pa-dpo-training)
+  - [5. Inference](#step-5-inference)
+  - [6. Evaluation](#step-6-evaluation)
+- [Baselines](#-baselines)
+- [Citation](#-citation)
 
-This repository implements \*\*PA-DPO (Persona-Act Direct Preference Optimization)\*\* — a method for faithful and personalized dialogue generation in agent–traveler negotiation settings.    
-The approach extends standard DPO to incorporate \*\*persona grounding\*\* and \*\*dialogue act consistency\*\*, ensuring coherent, personalized, and contextually faithful negotiation dialogues.
+---
 
-\---
+## 🔍 Overview & Architecture
 
-🔍 Overview
+Standard Direct Preference Optimization (DPO) aligns models on general fluency and helpfulness but frequently leads to persona drift, hallucinations, and strategic inconsistencies during multi-turn negotiations. **PA-DPO** addresses this by jointly learning persona extraction, act selection, and response generation under direct preference constraints.
 
-Given a conversational history:
+<p align="center">
+  <img src="PA-DPO_with_Retrieval.drawio.png" alt="PA-DPO Pipeline and Retrieval Architecture" width="95%"/>
+</p>
 
-\\\[  
-H \= (A\_1, U\_1, \\dots, A\_{t-1}, U\_{t-1})  
-\\\]
+Given dialogue history $H = (A_1, U_1, \dots, A_{t-1}, U_{t-1})$ and current user turn $U_t$:
+1. **Persona Triplets**: Extracts or tracks traveler preferences $(p_1, \dots, p_k)$.
+2. **Dialogue Act**: Determines the agent's target act $a_t$ (e.g., *Propose*, *Counter*, *Clarify*).
+3. **Agent Response**: Synthesizes the grounded utterance $A_t$.
 
-where \\(A\\) and \\(U\\) denote the agent and user turns respectively, and a user’s current turn \\(U\_t\\), the model generates:
+### Formulation
+* **Input Sequence**:
+  $$X = \text{INST} \oplus H \oplus U_t$$
+* **Target Output Sequence**:
+  $$Y = \text{[BOS][BPER]}p_1 \dots p_k\text{[EPER][BACT]}a_t\text{[EACT][BRES]}A_t\text{[ERES][EOS]}$$
 
-1\. The traveler’s **persona triplets** \\((p\_1, \\dots, p\_k)\\)  
-2\. The agent’s **dialogue act** \\(a\_t\\)  
-3\. The agent’s **response** \\(A\_t\\)
+---
 
-Each training sample is represented as:
+## 🧠 Methodology
 
-\- **Input**:    
-  \\(X \= \\text{INST} \\oplus H \\oplus U\_t\\)
+```
+                          ┌──────────────────────────┐
+                          │  Raw Dialogue History    │
+                          └────────────┬─────────────┘
+                                       │
+                                       ▼
+                   ┌───────────────────────────────────────┐
+                   │  Supervised Fine-Tuning (Qwen2.5-3B)  │
+                   └───────────────────┬───────────────────┘
+                                       │ Base Model (π_SFT)
+                                       ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                     Preference Data Mining                          │
+    │  • Persona-Act Retrieval  • Selective Masking  • Hallucination Mining│
+    └──────────────────────────────────┬──────────────────────────────────┘
+                                       │ Pairs: (y⁺, y⁻), (pa⁺, pa⁻)
+                                       ▼
+                   ┌───────────────────────────────────────┐
+                   │          PA-DPO Optimization          │
+                   │      L_PADPO = L_DPO + λ · L_PA       │
+                   └───────────────────────────────────────┘
+```
 
-\- **Output**:    
-  \\\[  
-  Y \= \[BOS\]\[BPER\]p\_1…p\_k\[EPER\]\[BACT\]a\_t\[EACT\]\[BRES\]A\_t\[ERES\]\[EOS\]  
-  \\\]
+1. **Supervised Fine-Tuning (SFT)**:  
+   Initializes the base policy $\pi_{\text{SFT}}$ on paired conversational contexts using **Qwen2.5-3B-Instruct**:
+   $$\mathcal{L}_{\text{SFT}} = -\mathbb{E}_{(X,Y) \sim \mathcal{D}} \left[ \sum_i \log \pi_\theta(y_i \mid y_{<i}, X) \right]$$
 
-Special tokens (\`\[BPER\]\`, \`\[BACT\]\`, \`\[BRES\]\`, etc.) are used to mark persona, dialogue act, and response spans.
+2. **Preference Construction**:
+   * **Persona-Act Retrieval**: Gathers semantically aligned dialogue states to establish positive act/persona candidates.
+   * **Selective Masking**: Corrupts valid turns by stripping key persona bindings to generate hard negatives.
+   * **Hallucination Elicitation**: Generates negative turns where agent statements contradict known persona constraints.
 
-\---
+3. **PA-DPO Objective**:
+   Optimizes preference margin over complete turns while penalizing persona and act inconsistencies:
+   $$\mathcal{L}_{\text{PA-DPO}} = \mathcal{L}_{\text{DPO}} + \mathcal{L}_{\text{PA}}$$
 
-🧠 Methodology Summary
+---
 
-1\. Supervised Fine-Tuning (SFT)  
-We fine-tune **Qwen2.5-3B-Instruct** on the supervised dataset \\(D=\\{(X\_n,Y\_n)\\}\\) by minimizing:
+## 📂 Repository Structure
 
-\\\[  
-\\mathcal{L}\_{SFT} \= \-E\_{(X,Y)\\sim D}\\left\[\\sum\_i \\log \\pi\_\\theta(y\_i|y\_{\<i},X)\\right\]  
-\\\]
+```text
+mediator/
+├── baselines/                  # Comparative baseline models
+│   ├── final_dpo.py            # Standard DPO without persona-act guidance
+│   ├── final_kto.py            # Kahneman-Tversky Optimization (KTO)
+│   ├── final_ppo.py            # PPO reinforcement learning baseline
+│   └── final_sft_llama.py      # LLaMA-based SFT pipeline
+│
+├── eval/                       # Benchmark evaluation scripts
+│   ├── eval_padpo.py           # Core evaluation runner for PA-DPO
+│   ├── eval_ppo.py             # Evaluation runner for PPO models
+│   ├── final_eval_1.py         # Response generation quality metrics
+│   ├── final_eval_2.py         # Negotiation & task-completion metrics
+│   ├── pacons_classifier.py    # Persona-act consistency classifier
+│   └── pacons_pre.py           # Preprocessing for consistency evaluator
+│
+├── inference/                  # Test inference & generation scripts
+│   ├── final_infer_pa_dpo.py   # PA-DPO inference with structured parsing
+│   ├── final_infer_sft_qwen.py # Direct inference for SFT Qwen model
+│   ├── final_infer_ppo.py      # Direct inference for PPO model
+│   ├── final_infer_gpt5.py     # External LLM judge & evaluation script
+│   ├── final_infer_cpu.py      # Local CPU-only test runner
+│   └── final_infer.py          # Unified entry-point for evaluation inference
+│
+├── PA-DPO/                     # Core alignment framework
+│   └── final_padpo.py          # Main PA-DPO trainer implementation
+│
+├── preference_data/            # Dataset construction
+│   ├── final_gen_triplets.py   # Triplet extraction script
+│   └── final_pref_dataset_gen.py # Preference pair generator
+│
+├── sft/                        # Supervised instruction tuning
+│   ├── final_preprocess_sft.py # Raw dialogue to instruction-token format
+│   └── final_sft_qwen25.py     # Qwen2.5-3B instruction fine-tuning
+│
+├── PA-DPO_with_Retrieval.drawio.png # Architecture and dataflow diagram
+└── README.md
+```
 
-to obtain a base model \\( \\pi\_{\\text{SFT}} \\).
+---
 
-2\. Preference Data Generation  
-We construct preference pairs \\((y^+, y^-)\\) through:  
-\- **Selective Masking** — removing persona/act cues from preferred responses.  
-\- **Persona-Act Retrieval** — retrieving semantically similar samples for persona and act grounding.  
-\- **Hallucination Elicitation** — regenerating responses that violate persona or act consistency.
+## ⚙️ Installation & Environment Setup
 
-3\. PA-DPO Training  
-Using the preference dataset    
-\\(D\_{\\text{pref}} \= \\{(x, y^+, y^-, pa^+, pa^-)\\}\\),    
-we optimize the combined objective:
+### 1. Conda Environment
+```bash
+conda create -n mediator python=3.12 -y
+conda activate mediator
+```
 
-\\\[  
-\\mathcal{L}\_{PA\\text{-DPO}} \= \\mathcal{L}\_{\\text{DPO}} \+ \\mathcal{L}\_{PA}  
-\\\]
-
-where \\(\\mathcal{L}\_{PA}\\) incorporates persona and act likelihoods to reinforce fidelity and constraint adherence.
-
-\---
-
-📂 Repository Structure
-
-mediator/  
- ├── baselines/  
- │ ├── final\_dpo.py  
- │ ├── final\_kto.py  
- │ ├── final\_ppo.py  
- │ └── final\_sft\_llama.py  
- │  
- ├── eval/  
- │ ├── eval\_padpo.py  
- │ ├── eval\_ppo.py  
- │ ├── final\_eval\_1.py  
- │ ├── final\_eval\_2.py  
- │ ├── pacons\_classifier.py  
- │ └── pacons\_pre.py  
- │  
- ├── inference/  
- │ ├── final\_infer\_pa\_dpo.py  
- │ ├── final\_infer\_sft\_qwen.py  
- │ ├── final\_infer\_ppo.py  
- │ ├── final\_infer\_gpt5.py  
- │ ├── final\_infer\_cpu.py  
- │ └── final\_infer.py  
- │  
- ├── PA-DPO/  
- │ └── final\_padpo.py  
- │  
- ├── preference\_data/  
- │ ├── final\_gen\_triplets.py  
- │ └── final\_pref\_dataset\_gen.py  
- │  
- ├── sft/  
- │ ├── final\_preprocess\_sft.py  
- │ └── final\_sft\_qwen25.py  
- │  
- └── README.md
-
-\---
-
-⚙️ Setup
-
-1\. Environment
-
-\`\`\`bash  
-conda create \-n mediator python=3.12  
-conda activate mediator  
-pip install torch torchvision torchaudio  
-pip install transformers datasets accelerate peft  
+### 2. Dependencies
+Install PyTorch for your CUDA version (CUDA 12.1+ recommended):
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install transformers datasets accelerate peft
 pip install pandas numpy tqdm scikit-learn sentence-transformers
+```
 
-(Optional) For multi-GPU training:
-
+*(Optional) Multi-GPU distributed training support:*
+```bash
 pip install deepspeed
+```
 
-### **2\. Dataset Format**
-
-The dataset is stored as a **CSV file** with alternating traveler and agent utterances in multi-turn dialogues.  
- The **first row** of each dialogue contains traveler persona information:
-
-| dialogue\_id | turn | speaker | utterance | persona\_evidences | persona\_triplets |
-| ----- | ----- | ----- | ----- | ----- | ----- |
-| 1 | 1 | traveler | I’m planning a trip to Paris. | adventurous, budget-conscious | (traveler, likes, adventure), (traveler, budget, low) |
-| 1 | 2 | agent | Great\! Let’s find something exciting yet affordable. | — | — |
+### 3. API Keys
+For evaluation and triplet generation scripts relying on external LLM services, set your OpenAI API key in your shell environment:
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+```
 
 ---
 
-## **🚀 Running the Pipeline**
+## 📊 Dataset Schema
 
-### **Step 1: Preprocessing**
+Input datasets must be structured in CSV format with alternating `traveler` and `agent` turns. Initial rows for each `dialogue_id` provide persona evidence:
 
-Prepare the dataset for SFT:
-
-python sft/final\_preprocess\_sft.py \--input\_path data/dialogues.csv \--output\_path data/sft\_ready.json
-
----
-
-### **Step 2: Supervised Fine-Tuning**
-
-Train the SFT model (Qwen2.5-3B-Instruct):
-
-python sft/final\_sft\_qwen25.py \\  
-    \--train\_file data/sft\_ready.json \\  
-    \--model\_name Qwen2.5-3B-Instruct \\  
-    \--output\_dir outputs/sft\_qwen25
+| dialogue_id | turn | speaker | utterance | persona_evidences | persona_triplets |
+| :---: | :---: | :---: | :--- | :--- | :--- |
+| `1` | 1 | traveler | I’m planning a trip to Paris next month. | adventurous, budget-conscious | `(traveler, likes, adventure), (traveler, budget, low)` |
+| `1` | 2 | agent | Great! Let’s find something exciting yet affordable. | — | — |
+| `1` | 3 | traveler | I prefer boutique hostels or shared lofts. | prefers hostels | `(traveler, lodging, hostel)` |
 
 ---
 
-### **Step 3: Preference Data Generation**
+## 🚀 Pipeline Execution
 
-Generate persona-act based preference pairs:
+### Step 1: Data Preprocessing
+Convert raw conversational logs into prompt-response training representations:
+```bash
+python sft/final_preprocess_sft.py \
+    --input_path data/dialogues.csv \
+    --output_path data/sft_ready.json
+```
 
-python preference\_data/final\_pref\_dataset\_gen.py \\  
-    \--input data/sft\_ready.json \\  
-    \--output data/pref\_data.json
+### Step 2: Supervised Fine-Tuning (SFT)
+Fine-tune **Qwen2.5-3B-Instruct** on structured sequences:
+```bash
+python sft/final_sft_qwen25.py \
+    --train_file data/sft_ready.json \
+    --model_name Qwen/Qwen2.5-3B-Instruct \
+    --output_dir outputs/sft_qwen25
+```
 
-(Optional) Generate persona triplets:
+### Step 3: Preference Dataset Generation
+Construct preference pairs with persona and act signals:
+```bash
+# 1. Generate preference pairs
+python preference_data/final_pref_dataset_gen.py \
+    --input data/sft_ready.json \
+    --output data/pref_data.json
 
-python preference\_data/final\_gen\_triplets.py
+# 2. Extract persona triplets
+python preference_data/final_gen_triplets.py
+```
 
----
+### Step 4: PA-DPO Training
+Train the final aligned policy using the composite objective:
+```bash
+python PA-DPO/final_padpo.py \
+    --model_path outputs/sft_qwen25 \
+    --pref_data data/pref_data.json \
+    --output_dir outputs/pa_dpo
+```
 
-### **Step 4: Persona-Act DPO Training**
+### Step 5: Inference
+Run batch generation over evaluation splits:
+```bash
+python inference/final_infer_pa_dpo.py \
+    --model_dir outputs/pa_dpo \
+    --test_file data/test.csv \
+    --save_path results/padpo_generations.json
+```
 
-Run PA-DPO fine-tuning:
+*For unformatted generation strings without token parsing:*
+```bash
+python inference/final_infer_pa_dpo.py --raw_output
+```
 
-python PA-DPO/final\_padpo.py \\  
-    \--model\_path outputs/sft\_qwen25 \\  
-    \--pref\_data data/pref\_data.json \\  
-    \--output\_dir outputs/pa\_dpo
-
----
-
-### **Step 5: Inference**
-
-Generate model outputs on the test set:
-
-python inference/final\_infer\_pa\_dpo.py \\  
-    \--model\_dir outputs/pa\_dpo \\  
-    \--test\_file data/test.csv \\  
-    \--save\_path results/padpo\_generations.json
-
-If you only need raw text output (no formatting cleanup):
-
-python inference/final\_infer\_pa\_dpo.py \--raw\_output
-
----
-
-### **Step 6: Evaluation**
-
-Evaluate generated responses for persona and act consistency:
-
-python eval/eval\_padpo.py \\  
-    \--pred\_file results/padpo\_generations.json \\  
-    \--ref\_file data/test.csv
-
-Other scripts (`final_eval_1.py`, `final_eval_2.py`, `pacons_classifier.py`) provide alternate or ablation-specific evaluation metrics.
-
----
-
-## **📈 Baselines**
-
-| Model | Script | Description |
-| ----- | ----- | ----- |
-| **SFT (LLaMA / Qwen)** | `baselines/final_sft_llama.py` | Standard supervised fine-tuning baseline |
-| **DPO** | `baselines/final_dpo.py` | Vanilla DPO without persona/act grounding |
-| **KTO** | `baselines/final_kto.py` | KTO baseline for preference learning |
-| **PPO** | `baselines/final_ppo.py` | Reinforcement learning baseline using PPO |
-| **PA-DPO** | `PA-DPO/final_padpo.py` | Persona- and act-guided preference optimization (ours) |
-
----
-
-## **💬 Citation**
-
-If you use this work, please cite:
+### Step 6: Evaluation
+Compute objective metrics for persona fidelity, act agreement, and conversational quality:
+```bash
+python eval/eval_padpo.py \
+    --pred_file results/padpo_generations.json \
+    --ref_file data/test.csv
+```
 
 ---
 
-## **🧩 Key Features**
+## 📈 Baselines
 
-* ✅ Persona and dialogue act grounding for negotiation dialogues
-
-* ✅ Retrieval-guided hallucination elicitation for controlled preference data
-
-* ✅ Joint DPO \+ Persona-Act preference optimization
-
-* ✅ Modular code: SFT, PA-DPO, preference data, inference, evaluation
-
----
-
-## **🧑‍💻 Author**
+| Method | Script | Description |
+| :--- | :--- | :--- |
+| **SFT (LLaMA)** | `baselines/final_sft_llama.py` | LLaMA baseline fine-tuned without persona-act guidance |
+| **Vanilla DPO** | `baselines/final_dpo.py` | Standard DPO objective without structural tags |
+| **KTO** | `baselines/final_kto.py` | Kahneman-Tversky Optimization baseline |
+| **PPO** | `baselines/final_ppo.py` | RL baseline optimized against a reward model |
+| **PA-DPO (Ours)**| `PA-DPO/final_padpo.py` | Full joint persona-act direct preference optimization |
 
 ---
 
-## **🏁 License**
+## 💬 Citation
 
-This project is for academic research use only.
 
-\---
+---
 
-# MEDIATOR
+## 📄 License
+This codebase is released for academic research and educational evaluation purposes.
